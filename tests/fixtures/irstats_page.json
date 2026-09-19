@@ -1,7 +1,0 @@
-{
-  "page": 1,
-  "per_page": 50,
-  "has_more": false,
-  "html": "<table><tbody><tr data-start-time='2026-09-19T17:30:00Z' data-series='Global Mazda MX-5 Cup by Fanatec' data-category='sports_car' data-car='Global Mazda MX-5 Cup' data-track='Okayama International Circuit' data-finish='1' data-incidents='0x' data-sof='3196'><td><a href='/series/139'>Global Mazda MX-5 Cup by Fanatec</a></td><td>Okayama International Circuit</td><td>Global Mazda MX-5 Cup</td><td>1</td><td>0x</td><td>3196</td><td><a href='/race/88756192'>Results</a></td></tr></tbody></table>"
-}
-

@@ -6,7 +6,7 @@
 
 ## Источники
 
-1. `https://irstats.com/api/driver/{cust_id}/races?page={page}&per_page=50` — публичный индекс истории и источник `subsession_id`.
+1. `https://irstats.com/driver/{cust_id}/races?page={page}` — обычная публичная server-rendered HTML-история и источник `subsession_id`.
 2. `https://iracing6-backend.herokuapp.com/api/sessionData/results/{subsession_id}` — точный JSON результата, включая `season_id`, `start_time`, `oldi_rating`, `newi_rating`, `car_name`, `track_name` и строки гонщиков.
 3. `https://iracing6-backend.herokuapp.com/api/series-basic-info/all-seasons` — локально кэшируемое соответствие season/category.
 4. `https://iracing6-backend.herokuapp.com/api/series-basic-info/series-basic-info/{season_name}` — расписание сезона с `race_week_num`, `start_date` и трассой.
@@ -51,6 +51,10 @@ python main.py sync --cust-id 123456 --db-path data\iracing.db
 
 Во время sync сначала последовательно читаются страницы irstats. Затем отсутствующие детали запрашиваются максимум двумя параллельными workers. Каждый результат сохраняется сразу после успешной обработки, поэтому остановка процесса не уничтожает уже импортированный прогресс.
 
+Если обычный HTML-запрос irstats получает HTTP 403, приложение открывает только публичную страницу irstats в обычном видимом persistent Playwright browser context и ждёт, пока пользователь при необходимости завершит стандартную проверку Cloudflare. Никакие stealth/fingerprint/proxy/CAPTCHA bypass механизмы не используются. Профиль сохраняется локально в `%USERPROFILE%\.iracing-weekly-tracker\irstats-browser-profile`.
+
+Fallback по умолчанию запускает установленный системный Chrome. Если Chrome отсутствует, можно установить bundled Chromium командой `playwright install chromium` и передать `browser_channel=None` при создании клиента.
+
 Повторный quick sync останавливается после страницы, где все результаты уже существуют локально и содержат полноценный detail response. `--full-rescan` принудительно перечитывает все доступные страницы и детали.
 
 ## Web UI
@@ -89,7 +93,7 @@ Practice и Qualifying никогда не сохраняются: adapter вы�
 
 В SQLite сохраняются `season_id`, `season_year`, `season_quarter`, `race_week_num` и `race_week_source`. Season/category и schedule metadata кэшируются локально, чтобы повторный анализ не зависел от повторного сетевого запроса.
 
-Если schedule metadata недоступна, гонка сохраняется, но race week остаётся неизвестной. Приложение не подменяет это ISO-неделей и не выдумывает значение.
+Если schedule metadata недоступна или не даёт week/category, приложение один раз использует публичную HTML-страницу конкретной гонки как fallback. Точные результат, iRating, трасса, машина и SOF по-прежнему берутся из iRacingData. Приложение не подменяет это ISO-неделей и не выдумывает значение.
 
 ## Continuity и incomplete history
 

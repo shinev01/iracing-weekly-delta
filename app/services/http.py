@@ -88,7 +88,7 @@ class ResilientHTTPClient:
         self.user_agent = user_agent
 
     def get_json(self, url: str) -> tuple[Any, HTTPResponse]:
-        response = self.get(url)
+        response = self.get(url, accept="application/json")
         try:
             return json.loads(response.body.decode("utf-8")), response
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -96,10 +96,14 @@ class ResilientHTTPClient:
                 f"{url} returned invalid JSON (HTTP {response.status})."
             ) from exc
 
-    def get(self, url: str) -> HTTPResponse:
+    def get_html(self, url: str) -> HTTPResponse:
+        """Fetch a normal server-rendered HTML page."""
+        return self.get(url, accept="text/html,application/xhtml+xml")
+
+    def get(self, url: str, *, accept: str = "application/json") -> HTTPResponse:
         last_error: Exception | None = None
         headers = {
-            "Accept": "application/json",
+            "Accept": accept,
             "User-Agent": self.user_agent,
         }
         for attempt in range(self.max_attempts):
@@ -136,4 +140,3 @@ class ResilientHTTPClient:
             return response
 
         raise RemoteSourceError(f"Unable to fetch {url}: {last_error}")
-

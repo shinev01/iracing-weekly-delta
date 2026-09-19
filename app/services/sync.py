@@ -191,6 +191,21 @@ class SyncService:
 
         year, quarter = _season_identity(detail.season_name)
         race_week_num, week_source = _resolve_week(detail.start_time_utc, detail.track_name, schedule)
+        if race_week_num is None or category is None:
+            race_page_fetcher = getattr(self.ir_stats, "fetch_race_page", None)
+            if callable(race_page_fetcher):
+                try:
+                    race_page = race_page_fetcher(detail.subsession_id)
+                    if race_week_num is None and race_page.race_week_num is not None:
+                        race_week_num = race_page.race_week_num
+                        week_source = "irstats-race-page"
+                    if category is None and race_page.category:
+                        category = race_page.category
+                except Exception as exc:
+                    self.progress(
+                        f"irstats race-page fallback unavailable for "
+                        f"{detail.subsession_id}: {exc}"
+                    )
         return RaceResult(
             subsession_id=detail.subsession_id,
             cust_id=detail.cust_id,

@@ -9,4 +9,4 @@ iracing.db
 *.sqlite
 *.sqlite3
 .env
-
+.irstats-browser-profile/
