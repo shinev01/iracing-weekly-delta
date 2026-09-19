@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}Debug · iRacing Weekly Tracker{% endblock %}
+{% block content %}
+<main class="narrow">
+  <section class="page-heading"><p class="eyebrow">SOURCE HEALTH</p><h1>Debug information</h1><p class="muted">Useful when community aggregators have incomplete or delayed history.</p></section>
+  <section class="form-card">
+    {% if cust_id %}<p>Customer ID: <strong>{{ cust_id }}</strong></p>{% endif %}
+    <dl class="debug-list">{% for key, value in debug.items() %}<div><dt>{{ key }}</dt><dd>{{ value or '—' }}</dd></div>{% else %}<div><dt>status</dt><dd>No Customer ID configured</dd></div>{% endfor %}</dl>
+  </section>
+</main>
+{% endblock %}
+

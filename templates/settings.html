@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}Settings · iRacing Weekly Tracker{% endblock %}
+{% block content %}
+<main class="narrow">
+  <section class="page-heading"><p class="eyebrow">LOCAL CONFIGURATION</p><h1>Settings</h1><p class="muted">Only the numeric Customer ID is stored. No password, email or OAuth token is used.</p></section>
+  <section class="form-card">
+    <form action="/settings" method="post">
+      <label>Customer ID<input name="cust_id" inputmode="numeric" pattern="[0-9]+" value="{{ cust_id }}" placeholder="123456" required></label>
+      <button class="button primary" type="submit">Save</button>
+    </form>
+  </section>
+  {% if debug %}
+  <section class="form-card"><h2>Current sync state</h2><dl class="debug-list">{% for key, value in debug.items() %}<div><dt>{{ key }}</dt><dd>{{ value or '—' }}</dd></div>{% endfor %}</dl></section>
+  {% endif %}
+</main>
+{% endblock %}
+

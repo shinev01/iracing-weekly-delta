@@ -1,0 +1,145 @@
+{% extends "base.html" %}
+{% block title %}Dashboard · iRacing Weekly Tracker{% endblock %}
+{% block content %}
+<main>
+  <section class="hero-row">
+    <div>
+      <p class="eyebrow">LOCAL DRIVER HISTORY</p>
+      <h1>Weekly iRating, without the guesswork.</h1>
+      <p class="muted">Public community index + exact cached race details. No iRacing OAuth credentials are stored.</p>
+    </div>
+    <div class="hero-actions">
+      <form action="/sync" method="post" data-sync-form>
+        <input type="hidden" name="mode" value="quick">
+        <button class="button primary" type="submit" data-sync-button {% if not cust_id %}disabled{% endif %}>Sync</button>
+      </form>
+      <form action="/sync" method="post" data-sync-form>
+        <input type="hidden" name="mode" value="full">
+        <button class="button ghost" type="submit" data-sync-button {% if not cust_id %}disabled{% endif %}>Full rescan</button>
+      </form>
+      <span class="sync-status" data-sync-status aria-live="polite"></span>
+    </div>
+  </section>
+
+  {% if not cust_id %}
+    <section class="empty-state">
+      <h2>Set your Customer ID to begin</h2>
+      <p class="muted">The app stores only the numeric iRacing Customer ID locally.</p>
+      <a class="button primary" href="/settings">Open settings</a>
+    </section>
+  {% else %}
+    <section class="filter-panel">
+      <form method="get" action="/" class="filters">
+        <label>Category
+          <select name="category" onchange="this.form.submit()">
+            {% for option in category_options %}
+              <option value="{{ option.value }}" {% if option.value == category %}selected{% endif %}>{{ option.label }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>Season
+          <select name="season_name" onchange="this.form.submit()">
+            <option value="">All seasons</option>
+            {% for option in season_options %}
+              <option value="{{ option }}" {% if option == season_name %}selected{% endif %}>{{ option }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>Series
+          <select name="series_name" onchange="this.form.submit()">
+            <option value="">All series</option>
+            {% for option in series_options %}
+              <option value="{{ option }}" {% if option == series_name %}selected{% endif %}>{{ option }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>Car
+          <select name="car_name" onchange="this.form.submit()">
+            <option value="">All cars</option>
+            {% for option in car_options %}
+              <option value="{{ option }}" {% if option == car_name %}selected{% endif %}>{{ option }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>Track
+          <select name="track_name" onchange="this.form.submit()">
+            <option value="">All tracks</option>
+            {% for option in track_options %}
+              <option value="{{ option }}" {% if option == track_name %}selected{% endif %}>{{ option }}</option>
+            {% endfor %}
+          </select>
+        </label>
+      </form>
+    </section>
+
+    <section class="metric-grid">
+      <article class="metric-card accent"><span>Current iRating</span><strong>{{ summary.current_irating or '—' }}</strong></article>
+      <article class="metric-card"><span>Season change</span><strong class="{% if summary.season_change is not none and summary.season_change >= 0 %}positive{% elif summary.season_change is not none %}negative{% endif %}">{{ '%+d'|format(summary.season_change) if summary.season_change is not none else '—' }}</strong></article>
+      <article class="metric-card"><span>Races</span><strong>{{ summary.races }}</strong></article>
+      <article class="metric-card"><span>Wins</span><strong>{{ summary.wins }}</strong></article>
+      <article class="metric-card"><span>Podiums</span><strong>{{ summary.podiums }}</strong></article>
+      <article class="metric-card"><span>Avg SOF</span><strong>{{ summary.avg_sof or '—' }}</strong></article>
+    </section>
+
+    <section class="chart-card">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">{{ category_label }}</p>
+          <h2>iRating history</h2>
+        </div>
+        <div class="segmented" role="group" aria-label="Chart mode">
+          <button class="segment active" data-chart-mode="weekly">Weekly</button>
+          <button class="segment" data-chart-mode="race">Every race</button>
+        </div>
+      </div>
+      <div class="chart-wrap"><canvas id="iratingChart" aria-label="iRating chart"></canvas></div>
+    </section>
+
+    <section class="weeks-section">
+      <div class="section-heading">
+        <div><p class="eyebrow">RACE WEEK LEDGER</p><h2>Weekly change</h2></div>
+        <span class="muted">{{ weekly|length }} weeks</span>
+      </div>
+      {% if weekly %}
+        <div class="week-list">
+          {% for week in weekly|reverse %}
+            <details class="week-row">
+              <summary>
+                <div class="week-main"><strong>{{ week.race_week_label }}</strong><span>{{ week.race_count }} races · {{ week.category_name }}</span></div>
+                <div class="week-rating">{{ week.start_irating or '—' }} <span>→</span> {{ week.end_irating or '—' }}</div>
+                <div class="week-delta {% if week.delta is not none and week.delta >= 0 %}positive{% elif week.delta is not none %}negative{% endif %}">{{ '%+d'|format(week.delta) if week.delta is not none else 'n/a' }}</div>
+                <div class="status {% if week.continuity_ok %}verified{% else %}incomplete{% endif %}">{% if week.continuity_ok %}Verified{% else %}⚠ Incomplete data{% endif %}</div>
+              </summary>
+              <div class="week-details">
+                <div class="mini-stats"><span>Wins <b>{{ week.wins }}</b></span><span>Podiums <b>{{ week.podiums }}</b></span><span>Incidents <b>{{ week.incidents }}</b></span><span>Avg SOF <b>{{ week.avg_sof or '—' }}</b></span></div>
+                <div class="race-table-wrap">
+                  <table>
+                    <thead><tr><th>Date</th><th>Series</th><th>Track</th><th>Car</th><th>Start</th><th>Finish</th><th>SOF</th><th>iRating</th><th>Δ</th><th>Inc</th></tr></thead>
+                    <tbody>
+                    {% for race in week.races %}
+                      <tr>
+                        <td>{{ race.start_time_utc[:10] }}</td><td>{{ race.series_name or race.season_name or '—' }}</td><td>{{ race.track_name or '—' }}</td><td>{{ race.car_name or '—' }}</td>
+                        <td>{{ race.display_start_position }}</td><td>{{ race.display_finish_position }}</td><td>{{ race.sof or '—' }}</td>
+                        <td>{{ race.old_irating or '—' }} → {{ race.new_irating or '—' }}</td><td class="{% if race.irating_delta is not none and race.irating_delta >= 0 %}positive{% else %}negative{% endif %}">{{ '%+d'|format(race.irating_delta) if race.irating_delta is not none else '—' }}</td><td>{{ race.incidents if race.incidents is not none else '—' }}</td>
+                      </tr>
+                    {% endfor %}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </details>
+          {% endfor %}
+        </div>
+      {% else %}
+        <div class="empty-state compact"><h3>No imported races yet</h3><p class="muted">Run Sync to fetch the public history.</p></div>
+      {% endif %}
+    </section>
+  {% endif %}
+</main>
+<script>
+window.IRACING_WEEKLY_DATA = {
+  weekly: {{ weekly|tojson }},
+  everyRace: {{ every_race|tojson }}
+};
+</script>
+{% endblock %}

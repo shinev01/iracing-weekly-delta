@@ -1,0 +1,2 @@
+"""Application domain models."""
+

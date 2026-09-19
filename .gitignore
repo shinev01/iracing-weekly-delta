@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
+iracing.db
+*.db
+*.sqlite
+*.sqlite3
+.env
+

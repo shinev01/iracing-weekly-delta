@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{% block title %}iRacing Weekly Tracker{% endblock %}</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='style.css') }}">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+  </head>
+  <body>
+    <div class="shell">
+      <header class="topbar">
+        <a class="brand" href="/">iRacing Weekly Tracker</a>
+        <nav>
+          <a href="/">Dashboard</a>
+          <a href="/debug">Debug</a>
+          <a href="/settings">Settings</a>
+        </nav>
+      </header>
+      {% if sync_error %}
+        <div class="alert danger">{{ sync_error }}</div>
+      {% endif %}
+      {% block content %}{% endblock %}
+    </div>
+    <script src="{{ url_for('static', path='app.js') }}"></script>
+  </body>
+</html>
