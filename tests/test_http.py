@@ -1,4 +1,6 @@
-from app.services.http import HTTPResponse, ResilientHTTPClient
+import pytest
+
+from app.services.http import HTTPResponse, RateLimitError, ResilientHTTPClient
 
 
 def test_get_html_uses_html_accept_header() -> None:
@@ -29,3 +31,34 @@ def test_get_json_keeps_json_accept_header() -> None:
 
     assert payload == {}
     assert calls[0]["Accept"] == "application/json"
+
+
+def test_429_stops_without_fast_retries_and_uses_sixty_second_default() -> None:
+    calls = 0
+    sleeps: list[float] = []
+
+    def transport(url: str, headers: dict[str, str], timeout: float) -> HTTPResponse:
+        nonlocal calls
+        calls += 1
+        return HTTPResponse(429, {}, b"Too Many Requests")
+
+    client = ResilientHTTPClient(transport=transport, sleeper=sleeps.append)
+
+    with pytest.raises(RateLimitError) as error:
+        client.get_html("https://irstats.com/driver/1286053/races?page=4")
+
+    assert calls == 1
+    assert sleeps == []
+    assert error.value.retry_after == 60.0
+
+
+def test_429_preserves_retry_after_header() -> None:
+    def transport(url: str, headers: dict[str, str], timeout: float) -> HTTPResponse:
+        return HTTPResponse(429, {"retry-after": "37"}, b"Too Many Requests")
+
+    client = ResilientHTTPClient(transport=transport)
+
+    with pytest.raises(RateLimitError) as error:
+        client.get_html("https://irstats.com/driver/1286053/races?page=4")
+
+    assert error.value.retry_after == 37.0

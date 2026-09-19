@@ -17,7 +17,13 @@
         <input type="hidden" name="mode" value="full">
         <button class="button ghost" type="submit" data-sync-button {% if not cust_id %}disabled{% endif %}>Full rescan</button>
       </form>
-      <span class="sync-status" data-sync-status aria-live="polite"></span>
+      {% if index_sync_incomplete %}
+        <form action="/sync" method="post" data-sync-form>
+          <input type="hidden" name="mode" value="resume">
+          <button class="button ghost" type="submit" data-sync-button {% if not cust_id %}disabled{% endif %}>Resume import</button>
+        </form>
+      {% endif %}
+      <span class="sync-status" data-sync-status aria-live="polite">{{ sync_progress }}</span>
     </div>
   </section>
 

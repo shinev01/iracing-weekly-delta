@@ -18,7 +18,7 @@
         </nav>
       </header>
       {% if sync_error %}
-        <div class="alert danger">{{ sync_error }}</div>
+        <div class="alert danger sync-alert">{{ sync_error }}</div>
       {% endif %}
       {% block content %}{% endblock %}
     </div>

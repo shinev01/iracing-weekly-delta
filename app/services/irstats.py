@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import math
+import os
 import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
-from typing import Any, Iterator, Protocol
+from typing import Any, Callable, Iterator, Protocol
 from urllib.parse import parse_qs, urlparse
 
 from bs4 import BeautifulSoup
@@ -16,6 +18,7 @@ from bs4 import BeautifulSoup
 from app.models.normalized import normalize_category, parse_utc_datetime
 from app.services.http import (
     HTTPResponse,
+    RateLimitError,
     RemoteResponseError,
     RemoteSourceError,
     ResilientHTTPClient,
@@ -373,12 +376,14 @@ class PersistentBrowserHTMLClient:
                 str(self.profile_dir), **options
             )
         page = self._context.pages[0] if self._context.pages else self._context.new_page()
-        page.goto(url, wait_until="domcontentloaded", timeout=60_000)
+        navigation = page.goto(url, wait_until="domcontentloaded", timeout=60_000)
+        if navigation is not None and navigation.status == 429:
+            raise RateLimitError(url, _retry_after_header(navigation.headers))
         deadline = time.monotonic() + self.wait_seconds
-        body = page.content().encode("utf-8")
+        body = _stable_page_content(page, deadline)
         while _looks_like_cloudflare(body) and time.monotonic() < deadline:
             page.wait_for_timeout(1_000)
-            body = page.content().encode("utf-8")
+            body = _stable_page_content(page, deadline)
         if _looks_like_cloudflare(body):
             raise SourceBlockedError(
                 "irstats remains behind a Cloudflare browser check. "
@@ -386,7 +391,7 @@ class PersistentBrowserHTMLClient:
                 "no anti-bot bypass is used."
             )
         if "too many requests" in body.decode("utf-8", errors="ignore").casefold():
-            raise SourceBlockedError("irstats browser returned Too Many Requests; retry later.")
+            raise RateLimitError(url)
         return HTTPResponse(200, {"content-type": "text/html"}, body)
 
     def close(self) -> None:
@@ -412,8 +417,9 @@ class IrstatsClient:
         browser_profile: str | Path | None = None,
         browser_channel: str | None = "chrome",
         browser_wait_seconds: float = 180.0,
-        page_delay: float = 0.75,
+        page_delay: float | None = None,
         sleeper: Any = time.sleep,
+        progress: Callable[[str], None] | None = None,
     ) -> None:
         self.http = http or ResilientHTTPClient()
         self.browser = browser if browser is not None else PersistentBrowserHTMLClient(
@@ -421,31 +427,56 @@ class IrstatsClient:
             channel=browser_channel,
             wait_seconds=browser_wait_seconds,
         )
-        self.page_delay = page_delay
+        self.browser_only = False
+        self.page_delay = page_delay if page_delay is not None else _default_page_delay()
         self.sleeper = sleeper
+        self.progress = progress
 
     def _get_html(self, url: str) -> str:
+        if self.browser_only:
+            return self._get_browser_html(url)
         try:
             response = self.http.get_html(url)
+            if response.status == 403:
+                raise SourceBlockedError(f"{url} returned HTTP 403")
+            if response.status == 429:
+                raise RateLimitError(url, _retry_after_header(response.headers))
+            if response.status < 200 or response.status >= 300:
+                raise RemoteResponseError(f"{url} returned HTTP {response.status}.")
             if _looks_like_cloudflare(response.body):
                 raise SourceBlockedError(f"{url} returned a Cloudflare browser check")
             return response.body.decode("utf-8")
         except SourceBlockedError as direct_error:
-            if self.browser is None:
-                raise
-            try:
-                response = self.browser.get_html(url)
-            except SourceBlockedError:
-                raise
-            except Exception as exc:
+            # The direct client is known to be blocked for this IP. Keep this
+            # state for the lifetime of the client so page 2+ cannot double
+            # request irstats before falling back to the persistent browser.
+            self.browser_only = True
+            return self._get_browser_html(url, direct_error=direct_error)
+
+    def _get_browser_html(self, url: str, *, direct_error: Exception | None = None) -> str:
+        if self.browser is None:
+            if direct_error is not None:
+                raise direct_error
+            raise SourceBlockedError(f"{url} requires browser-only mode")
+        try:
+            response = self.browser.get_html(url)
+        except (RateLimitError, SourceBlockedError):
+            raise
+        except Exception as exc:
+            if direct_error is not None:
                 raise SourceBlockedError(
                     f"{url} was blocked by direct HTML and browser fallback was unavailable: {exc}"
                 ) from direct_error
-            if response.status < 200 or response.status >= 300:
-                raise RemoteResponseError(f"{url} returned HTTP {response.status} in browser.")
-            if _looks_like_cloudflare(response.body):
-                raise SourceBlockedError(f"{url} remains behind a Cloudflare browser check")
-            return response.body.decode("utf-8")
+            raise SourceBlockedError(f"{url} browser fallback was unavailable: {exc}") from exc
+        if response.status == 429:
+            raise RateLimitError(url, _retry_after_header(response.headers))
+        if response.status < 200 or response.status >= 300:
+            raise RemoteResponseError(f"{url} returned HTTP {response.status} in browser.")
+        if _looks_like_cloudflare(response.body):
+            raise SourceBlockedError(f"{url} remains behind a Cloudflare browser check")
+        if "too many requests" in response.body.decode("utf-8", errors="ignore").casefold():
+            raise RateLimitError(url, _retry_after_header(response.headers))
+        return response.body.decode("utf-8")
 
     def fetch_page(self, cust_id: int, page: int, per_page: int = 50) -> IrstatsPage:
         url = f"{self.base_url.format(cust_id=cust_id)}?page={page}"
@@ -471,4 +502,41 @@ class IrstatsClient:
                 return
             page_number += 1
             if self.page_delay:
+                if self.progress is not None:
+                    self.progress(f"Next request in {self.page_delay:g} seconds")
                 self.sleeper(self.page_delay)
+
+
+def _default_page_delay() -> float:
+    value = os.environ.get("IRSTATS_PAGE_DELAY", "6.0")
+    try:
+        return max(0.0, float(value))
+    except ValueError:
+        return 6.0
+
+
+def _stable_page_content(page: Any, deadline: float) -> bytes:
+    """Read content after navigation settles without creating another request."""
+    while True:
+        try:
+            return page.content().encode("utf-8")
+        except Exception:
+            if time.monotonic() >= deadline:
+                raise
+            page.wait_for_timeout(500)
+
+
+def _retry_after_header(headers: dict[str, str]) -> float | None:
+    value = headers.get("retry-after") or headers.get("Retry-After")
+    if not value:
+        return None
+    try:
+        return max(0.0, float(value))
+    except ValueError:
+        try:
+            target = parsedate_to_datetime(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if target.tzinfo is None:
+            target = target.astimezone()
+        return max(0.0, target.timestamp() - time.time())

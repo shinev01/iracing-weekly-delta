@@ -19,6 +19,17 @@ class SourceBlockedError(RemoteSourceError):
     """Raised when a source returns an anti-bot or access-block response."""
 
 
+class RateLimitError(RemoteSourceError):
+    """Raised when a remote source asks the caller to slow down."""
+
+    def __init__(self, url: str, retry_after: float | None = None) -> None:
+        self.url = url
+        self.retry_after = retry_after if retry_after is not None else 60.0
+        super().__init__(
+            f"{url} returned HTTP 429. Retry after about {self.retry_after:g} seconds."
+        )
+
+
 class RemoteResponseError(RemoteSourceError):
     """Raised for non-retryable HTTP or malformed responses."""
 
@@ -68,7 +79,7 @@ def _retry_after_seconds(value: str | None) -> float | None:
 class ResilientHTTPClient:
     """GET-only client with bounded retries and injectable transport for tests."""
 
-    RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+    RETRYABLE_STATUS = {500, 502, 503, 504}
 
     def __init__(
         self,
@@ -121,6 +132,15 @@ class ResilientHTTPClient:
                     f"{url} returned HTTP 403. Imported data has been preserved. "
                     "Try synchronization later; anti-bot protection is not bypassed."
                 )
+
+            if response.status == 429:
+                retry_after = _retry_after_seconds(
+                    response.headers.get("retry-after")
+                    or response.headers.get("Retry-After")
+                )
+                # A 429 is a signal to stop this sync, not a transient error to
+                # hammer three more times with exponential backoff.
+                raise RateLimitError(url, retry_after)
 
             if response.status in self.RETRYABLE_STATUS:
                 if attempt + 1 >= self.max_attempts:

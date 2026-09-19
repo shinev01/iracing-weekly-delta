@@ -76,6 +76,39 @@ def test_irstats_client_uses_browser_only_after_direct_html_is_blocked() -> None
     assert page.races[0].subsession_id == 88756192
 
 
+def test_irstats_client_stays_browser_only_after_first_direct_403() -> None:
+    html = (Path(__file__).parent / "fixtures" / "irstats_page.html").read_bytes()
+
+    class BlockedHTML:
+        def __init__(self) -> None:
+            self.urls: list[str] = []
+
+        def get_html(self, url: str) -> HTTPResponse:
+            self.urls.append(url)
+            raise SourceBlockedError(f"{url} returned HTTP 403")
+
+    direct = BlockedHTML()
+    browser = FakeBrowser(html)
+    client = IrstatsClient(http=direct, browser=browser, page_delay=0)
+
+    client.fetch_page(1286053, 1)
+    client.fetch_page(1286053, 2)
+
+    assert client.browser_only is True
+    assert direct.urls == ["https://irstats.com/driver/1286053/races?page=1"]
+    assert browser.urls == [
+        "https://irstats.com/driver/1286053/races?page=1",
+        "https://irstats.com/driver/1286053/races?page=2",
+    ]
+
+
+def test_irstats_page_delay_defaults_to_six_seconds(monkeypatch) -> None:
+    monkeypatch.delenv("IRSTATS_PAGE_DELAY", raising=False)
+    client = IrstatsClient(http=FakeHTML(b""), browser=FakeBrowser(b""))
+
+    assert client.page_delay == 6.0
+
+
 def test_irstats_race_page_fallback_converts_display_week_to_internal_week() -> None:
     page = parse_irstats_race_page(
         """

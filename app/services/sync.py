@@ -2,18 +2,17 @@
 
 from __future__ import annotations
 
-import json
-import time
+import inspect
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Callable, Protocol
+from typing import Any, Protocol
 
 from app.database.repository import RaceRepository
 from app.models.normalized import RaceResult, normalize_category
-from app.services.http import SourceBlockedError
+from app.services.http import RateLimitError, SourceBlockedError
 from app.services.iracingdata import IRacingDataClient, IRacingDataRace, SeasonMetadataClient
-from app.services.irstats import IrstatsClient, IrstatsPage, IrstatsRaceIndex
+from app.services.irstats import IrstatsClient, IrstatsRaceIndex
 
 
 class ProgressReporter(Protocol):
@@ -36,6 +35,17 @@ class SyncReport:
     skipped_existing: int
     failed: int
     stopped_reason: str | None = None
+    completed_pages: int = 0
+    total_pages: int | None = None
+
+
+@dataclass(slots=True)
+class _IndexCollection:
+    races: list[IrstatsRaceIndex]
+    pages: int
+    stopped_reason: str | None
+    completed_pages: int
+    total_pages: int | None
 
 
 class SyncService:
@@ -52,7 +62,7 @@ class SyncService:
         progress: ProgressReporter = console_progress,
     ) -> None:
         self.repository = repository
-        self.ir_stats = ir_stats or IrstatsClient()
+        self.ir_stats = ir_stats or IrstatsClient(progress=progress)
         self.iracing_data = iracing_data or IRacingDataClient()
         self.metadata = metadata or SeasonMetadataClient()
         self.detail_workers = max(1, min(detail_workers, 4))
@@ -61,17 +71,24 @@ class SyncService:
     def sync(self, cust_id: int, *, full_rescan: bool = False) -> SyncReport:
         mode = "full" if full_rescan else "quick"
         self.repository.set_setting("cust_id", str(cust_id))
+        checkpoint_cust_id = _as_int(self.repository.get_meta("irstats_checkpoint_cust_id"))
+        if checkpoint_cust_id not in (None, cust_id):
+            self.repository.set_meta("last_successful_irstats_page", 0)
+            self.repository.set_meta("total_pages", None)
+            self.repository.set_meta("index_sync_incomplete", False)
+        self.repository.set_meta("irstats_checkpoint_cust_id", cust_id)
         self.repository.set_meta("last_sync_error", None)
         existing = self.repository.existing_subsessions(cust_id)
         self.progress(f"Customer ID: {cust_id}")
         self.progress("\nFetching irstats history...")
 
-        try:
-            index, pages = self._collect_index(cust_id, full_rescan=full_rescan)
-        except SourceBlockedError as exc:
-            self.repository.set_meta("last_sync_error", str(exc))
-            self.progress(str(exc))
-            return SyncReport(cust_id, mode, 0, 0, len(existing), 0, 0, 0, 0, str(exc))
+        collection = self._collect_index(cust_id, full_rescan=full_rescan)
+        index = collection.races
+        pages = collection.pages
+        stopped_reason = collection.stopped_reason
+        if stopped_reason:
+            self.repository.set_meta("last_sync_error", stopped_reason)
+            self.progress(stopped_reason)
 
         unique_index = {race.subsession_id: race for race in index}
         index = list(unique_index.values())
@@ -86,7 +103,6 @@ class SyncService:
         self.progress("\nFetching iRacingData:")
         imported = 0
         failed = 0
-        stopped_reason: str | None = None
         self._refresh_metadata_catalog()
 
         futures: dict[Future[IRacingDataRace | None], IrstatsRaceIndex] = {}
@@ -125,7 +141,10 @@ class SyncService:
         self.repository.set_meta("last_irstats_sync", now)
         self.repository.set_meta("last_sync", now)
         self.repository.set_meta("last_sync_mode", mode)
-        self.progress("\nImport complete.")
+        if stopped_reason:
+            self.progress("\nImport stopped; imported progress was saved.")
+        else:
+            self.progress("\nImport complete.")
         self.progress(f"Races: {self.repository.count(cust_id)}")
         return SyncReport(
             cust_id=cust_id,
@@ -138,22 +157,114 @@ class SyncService:
             skipped_existing=len(index) - len(pending),
             failed=failed,
             stopped_reason=stopped_reason,
+            completed_pages=collection.completed_pages,
+            total_pages=collection.total_pages,
         )
 
-    def _collect_index(self, cust_id: int, *, full_rescan: bool) -> tuple[list[IrstatsRaceIndex], int]:
+    def _collect_index(self, cust_id: int, *, full_rescan: bool) -> _IndexCollection:
         races: list[IrstatsRaceIndex] = []
         pages = 0
-        for page in self.ir_stats.iter_history(cust_id):
-            pages += 1
-            races.extend(page.races)
-            self.progress(f"Page {page.page}: {len(page.races)} races")
-            if not full_rescan and page.page > 1:
-                if all(
-                    self.repository.has_complete_detail(race.subsession_id, cust_id)
-                    for race in page.races
-                ):
+        stopped_reason: str | None = None
+        last_page = None
+        start_page = self._full_rescan_start_page(cust_id) if full_rescan else 1
+        total_pages = _as_int(self.repository.get_meta("total_pages"))
+        self.progress("Reading irstats history...")
+
+        try:
+            iterator = self._history_iterator(
+                cust_id,
+                start_page=start_page,
+                max_pages=None if full_rescan else 1,
+            )
+            for page in iterator:
+                pages += 1
+                last_page = page
+                if page.total_pages is not None:
+                    total_pages = page.total_pages
+                    self.repository.set_meta("total_pages", total_pages)
+                if full_rescan:
+                    self.repository.set_meta("last_successful_irstats_page", page.page)
+                    self.repository.set_meta("index_sync_incomplete", True)
+
+                # The index is durable before any iRacingData detail requests
+                # begin. A later 429 therefore cannot discard earlier pages.
+                for race in page.races:
+                    upsert_index = getattr(self.repository, "upsert_irstats_index", None)
+                    if callable(upsert_index):
+                        upsert_index(cust_id, race, page.page)
+                races.extend(page.races)
+                discovered = len({race.subsession_id for race in races})
+                total_label = total_pages if total_pages is not None else "?"
+                self.progress(f"Page {page.page} / {total_label}")
+                self.progress(f"{discovered} races discovered")
+                # Quick Sync is intentionally one request. This also keeps
+                # compatibility with simple test doubles that expose the old
+                # iter_history(cust_id) signature.
+                if not full_rescan:
                     break
-        return races, pages
+        except RateLimitError as exc:
+            stopped_reason = self._rate_limit_message(exc, full_rescan=full_rescan)
+            if full_rescan:
+                self.repository.set_meta("index_sync_incomplete", True)
+        except SourceBlockedError as exc:
+            stopped_reason = str(exc)
+            if full_rescan:
+                self.repository.set_meta("index_sync_incomplete", True)
+
+        if full_rescan and stopped_reason is None and last_page is not None and not last_page.has_more:
+            self.repository.set_meta("index_sync_incomplete", False)
+            self.repository.set_meta("last_successful_irstats_page", last_page.page)
+            if total_pages is not None:
+                self.repository.set_meta("total_pages", total_pages)
+
+        completed_pages = _as_int(self.repository.get_meta("last_successful_irstats_page")) or 0
+        return _IndexCollection(races, pages, stopped_reason, completed_pages, total_pages)
+
+    def _history_iterator(
+        self,
+        cust_id: int,
+        *,
+        start_page: int,
+        max_pages: int | None,
+    ):
+        method = self.ir_stats.iter_history
+        try:
+            parameters = inspect.signature(method).parameters
+        except (TypeError, ValueError):
+            parameters = {}
+        accepts_kwargs = any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters.values()
+        )
+        kwargs: dict[str, Any] = {}
+        if accepts_kwargs or "start_page" in parameters:
+            kwargs["start_page"] = start_page
+        if accepts_kwargs or "max_pages" in parameters:
+            kwargs["max_pages"] = max_pages
+        return method(cust_id, **kwargs)
+
+    def _full_rescan_start_page(self, cust_id: int) -> int:
+        del cust_id  # Reserved for per-driver metadata if the schema expands.
+        incomplete = self.repository.get_meta("index_sync_incomplete", False)
+        last_page = _as_int(self.repository.get_meta("last_successful_irstats_page")) or 0
+        return last_page + 1 if incomplete else 1
+
+    def _rate_limit_message(self, error: RateLimitError, *, full_rescan: bool) -> str:
+        completed = (
+            _as_int(self.repository.get_meta("last_successful_irstats_page")) or 0
+            if full_rescan
+            else 0
+        )
+        total = _as_int(self.repository.get_meta("total_pages"))
+        if total is None:
+            total = "?"
+        cooldown = f"{error.retry_after:g} seconds"
+        return (
+            "iRStats rate limit reached.\n\n"
+            "Imported progress was saved.\n"
+            f"Completed pages: {completed} / {total}\n\n"
+            f"Please wait about {cooldown} and press Resume import."
+        )
 
     def _fetch_detail(self, indexed: IrstatsRaceIndex, cust_id: int) -> IRacingDataRace | None:
         return self.iracing_data.get_race(indexed.subsession_id, cust_id)
@@ -191,21 +302,6 @@ class SyncService:
 
         year, quarter = _season_identity(detail.season_name)
         race_week_num, week_source = _resolve_week(detail.start_time_utc, detail.track_name, schedule)
-        if race_week_num is None or category is None:
-            race_page_fetcher = getattr(self.ir_stats, "fetch_race_page", None)
-            if callable(race_page_fetcher):
-                try:
-                    race_page = race_page_fetcher(detail.subsession_id)
-                    if race_week_num is None and race_page.race_week_num is not None:
-                        race_week_num = race_page.race_week_num
-                        week_source = "irstats-race-page"
-                    if category is None and race_page.category:
-                        category = race_page.category
-                except Exception as exc:
-                    self.progress(
-                        f"irstats race-page fallback unavailable for "
-                        f"{detail.subsession_id}: {exc}"
-                    )
         return RaceResult(
             subsession_id=detail.subsession_id,
             cust_id=detail.cust_id,

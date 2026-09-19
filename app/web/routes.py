@@ -23,7 +23,10 @@ def create_app(db_path: str | Path = "iracing.db") -> FastAPI:
     repository = RaceRepository(db_path)
     app = FastAPI(title="iRacing Weekly Tracker", version="0.1.0")
     app.state.repository = repository
-    app.state.sync_service = SyncService(repository)
+    def web_progress(message: str) -> None:
+        repository.set_meta("sync_progress", message)
+
+    app.state.sync_service = SyncService(repository, progress=web_progress)
     root = Path(__file__).resolve().parents[2]
     app.mount("/static", StaticFiles(directory=root / "static"), name="static")
     templates = Jinja2Templates(directory=root / "templates")
@@ -77,7 +80,12 @@ def create_app(db_path: str | Path = "iracing.db") -> FastAPI:
             "weekly": [summary.to_dict() for summary in weekly],
             "every_race": every_race_points(races),
             "debug": repository.latest_debug(cust_id) if cust_id else {},
+            "index_sync_incomplete": bool(repository.get_meta("index_sync_incomplete", False)),
+            "resume_page": (
+                (repository.get_meta("last_successful_irstats_page", 0) or 0) + 1
+            ),
             "sync_error": visible_sync_error,
+            "sync_progress": repository.get_meta("sync_progress", ""),
             "sync_error_json": json.dumps(visible_sync_error) if visible_sync_error else "null",
         }
         return templates.TemplateResponse(request, "index.html", context)
@@ -109,7 +117,9 @@ def create_app(db_path: str | Path = "iracing.db") -> FastAPI:
         if cust_id is None:
             return RedirectResponse(url="/settings", status_code=303)
         try:
-            report = app.state.sync_service.sync(cust_id, full_rescan=mode == "full")
+            report = app.state.sync_service.sync(
+                cust_id, full_rescan=mode in {"full", "resume"}
+            )
         except RemoteSourceError as exc:
             repository.set_meta("last_sync_error", str(exc))
             return RedirectResponse(url=f"/?sync_error={_quote(str(exc))}", status_code=303)

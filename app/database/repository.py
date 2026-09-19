@@ -76,6 +76,25 @@ CREATE TABLE IF NOT EXISTS sync_metadata (
     key TEXT PRIMARY KEY,
     value TEXT
 );
+
+CREATE TABLE IF NOT EXISTS irstats_index (
+    cust_id INTEGER NOT NULL,
+    page INTEGER NOT NULL,
+    subsession_id INTEGER NOT NULL,
+    start_time_utc TEXT,
+    series_name TEXT,
+    category TEXT,
+    car_name TEXT,
+    track_name TEXT,
+    finish_position INTEGER,
+    incidents INTEGER,
+    sof INTEGER,
+    raw_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (cust_id, subsession_id)
+);
+CREATE INDEX IF NOT EXISTS idx_irstats_index_page
+    ON irstats_index (cust_id, page);
 """
 
 
@@ -164,6 +183,54 @@ class RaceRepository:
         except json.JSONDecodeError:
             return False
         return isinstance(payload, dict) and bool(payload.get("results"))
+
+    def upsert_irstats_index(self, cust_id: int, race: Any, page: int) -> None:
+        """Persist one public index row before its detail request is made."""
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO irstats_index (
+                    cust_id, page, subsession_id, start_time_utc, series_name,
+                    category, car_name, track_name, finish_position, incidents,
+                    sof, raw_json, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(cust_id, subsession_id) DO UPDATE SET
+                    page=excluded.page,
+                    start_time_utc=excluded.start_time_utc,
+                    series_name=excluded.series_name,
+                    category=excluded.category,
+                    car_name=excluded.car_name,
+                    track_name=excluded.track_name,
+                    finish_position=excluded.finish_position,
+                    incidents=excluded.incidents,
+                    sof=excluded.sof,
+                    raw_json=excluded.raw_json,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    cust_id,
+                    page,
+                    race.subsession_id,
+                    isoformat_utc(race.start_time_utc),
+                    race.series_name,
+                    race.category,
+                    race.car_name,
+                    race.track_name,
+                    race.finish_position,
+                    race.incidents,
+                    race.sof,
+                    json.dumps(race.raw or {}, ensure_ascii=False),
+                    _now(),
+                ),
+            )
+
+    def irstats_index_count(self, cust_id: int) -> int:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) AS count FROM irstats_index WHERE cust_id = ?",
+                (cust_id,),
+            ).fetchone()
+        return int(row["count"])
 
     def existing_subsessions(self, cust_id: int) -> set[int]:
         with self.connect() as connection:
@@ -338,6 +405,11 @@ class RaceRepository:
             ).fetchone()
         return {
             "last_irstats_sync": self.get_meta("last_irstats_sync"),
+            "last_successful_irstats_page": self.get_meta("last_successful_irstats_page"),
+            "total_irstats_pages": self.get_meta("total_pages"),
+            "index_sync_incomplete": self.get_meta("index_sync_incomplete", False),
+            "cached_irstats_subsessions": self.irstats_index_count(cust_id),
+            "sync_progress": self.get_meta("sync_progress"),
             "last_iracingdata_sync": self.get_meta("last_iracingdata_sync"),
             "last_sync": self.get_meta("last_sync"),
             "last_sync_error": self.get_meta("last_sync_error"),
