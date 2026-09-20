@@ -9,7 +9,8 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from app.models.normalized import RaceResult, isoformat_utc, parse_utc_datetime
-from app.services.iracingdata import ScheduleEntry
+from app.services.iracingdata import ScheduleEntry, season_identity
+from app.services.irstats import IrstatsPage, IrstatsRaceIndex
 
 
 SCHEMA = """
@@ -95,6 +96,19 @@ CREATE TABLE IF NOT EXISTS irstats_index (
 );
 CREATE INDEX IF NOT EXISTS idx_irstats_index_page
     ON irstats_index (cust_id, page);
+
+CREATE TABLE IF NOT EXISTS irstats_pages (
+    cust_id INTEGER NOT NULL,
+    page INTEGER NOT NULL,
+    per_page INTEGER NOT NULL,
+    has_more INTEGER NOT NULL,
+    total_count INTEGER,
+    total_pages INTEGER,
+    next_page INTEGER,
+    raw_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (cust_id, page)
+);
 """
 
 
@@ -224,6 +238,107 @@ class RaceRepository:
                 ),
             )
 
+    def upsert_irstats_page(self, cust_id: int, page: IrstatsPage) -> None:
+        """Persist page-level pagination metadata alongside index rows."""
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO irstats_pages(
+                    cust_id, page, per_page, has_more, total_count, total_pages,
+                    next_page, raw_json, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(cust_id, page) DO UPDATE SET
+                    per_page=excluded.per_page,
+                    has_more=excluded.has_more,
+                    total_count=excluded.total_count,
+                    total_pages=excluded.total_pages,
+                    next_page=excluded.next_page,
+                    raw_json=excluded.raw_json,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    cust_id,
+                    page.page,
+                    page.per_page,
+                    int(page.has_more),
+                    page.total_count,
+                    page.total_pages,
+                    page.next_page,
+                    json.dumps(page.raw or {}, ensure_ascii=False),
+                    _now(),
+                ),
+            )
+
+    def cached_irstats_page(self, cust_id: int, page_number: int) -> IrstatsPage | None:
+        """Rehydrate one cached index page without contacting iRStats."""
+        with self.connect() as connection:
+            page_row = connection.execute(
+                "SELECT * FROM irstats_pages WHERE cust_id = ? AND page = ?",
+                (cust_id, page_number),
+            ).fetchone()
+            rows = connection.execute(
+                """
+                SELECT * FROM irstats_index
+                WHERE cust_id = ? AND page = ?
+                ORDER BY rowid
+                """,
+                (cust_id, page_number),
+            ).fetchall()
+        if not rows:
+            return None
+
+        races: list[IrstatsRaceIndex] = []
+        for row in rows:
+            try:
+                raw = json.loads(row["raw_json"] or "{}")
+            except json.JSONDecodeError:
+                raw = {}
+            races.append(
+                IrstatsRaceIndex(
+                    subsession_id=int(row["subsession_id"]),
+                    start_time_utc=parse_utc_datetime(row["start_time_utc"]),
+                    series_name=row["series_name"],
+                    category=row["category"],
+                    car_name=row["car_name"],
+                    track_name=row["track_name"],
+                    finish_position=row["finish_position"],
+                    incidents=row["incidents"],
+                    sof=row["sof"],
+                    raw=raw,
+                )
+            )
+
+        cached_total = (
+            int(page_row["total_pages"])
+            if page_row and page_row["total_pages"] is not None
+            else self.get_meta("total_pages")
+        )
+        has_more = (
+            bool(page_row["has_more"])
+            if page_row
+            else bool(cached_total and page_number < int(cached_total))
+        )
+        total_count = page_row["total_count"] if page_row else None
+        next_page = page_row["next_page"] if page_row else (page_number + 1 if has_more else None)
+        return IrstatsPage(
+            page=page_number,
+            per_page=int(page_row["per_page"]) if page_row else len(races),
+            has_more=has_more,
+            races=races,
+            raw=json.loads(page_row["raw_json"] or "{}") if page_row else {"cached": True},
+            total_count=total_count,
+            total_pages=cached_total,
+            next_page=next_page,
+        )
+
+    def cached_irstats_pages(self, cust_id: int) -> list[int]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT DISTINCT page FROM irstats_index WHERE cust_id = ? ORDER BY page",
+                (cust_id,),
+            ).fetchall()
+        return [int(row["page"]) for row in rows]
+
     def irstats_index_count(self, cust_id: int) -> int:
         with self.connect() as connection:
             row = connection.execute(
@@ -239,6 +354,24 @@ class RaceRepository:
                 (cust_id,),
             ).fetchall()
         return {int(row["subsession_id"]) for row in rows}
+
+    def race_season(self, subsession_id: int, cust_id: int) -> tuple[int | None, str | None, int | None, int | None] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT season_id, season_name, season_year, season_quarter
+                FROM races WHERE subsession_id = ? AND cust_id = ?
+                """,
+                (subsession_id, cust_id),
+            ).fetchone()
+        if not row:
+            return None
+        return (
+            row["season_id"],
+            row["season_name"],
+            row["season_year"],
+            row["season_quarter"],
+        )
 
     def upsert_schedule(self, entry: ScheduleEntry) -> None:
         with self.connect() as connection:
@@ -303,6 +436,60 @@ class RaceRepository:
                 (season_id,),
             ).fetchall()
 
+    def season_options(self, cust_id: int) -> list[dict[str, Any]]:
+        """Return grouped season choices from metadata plus local races."""
+        groups: dict[str, dict[str, Any]] = {}
+        with self.connect() as connection:
+            catalog_rows = connection.execute(
+                "SELECT season_id, season_name FROM season_catalog"
+            ).fetchall()
+            race_rows = connection.execute(
+                """
+                SELECT season_id, season_name, season_year, season_quarter
+                FROM races WHERE cust_id = ?
+                """,
+                (cust_id,),
+            ).fetchall()
+
+        def ensure(year: int, quarter: int) -> dict[str, Any]:
+            key = f"{year}-{quarter}"
+            return groups.setdefault(
+                key,
+                {
+                    "key": key,
+                    "label": f"{year} Season {quarter}",
+                    "downloaded": False,
+                    "races": 0,
+                },
+            )
+
+        for row in catalog_rows:
+            identity = season_identity(row["season_name"])
+            if identity is None:
+                continue
+            group = ensure(*identity)
+            group.setdefault("season_ids", []).append(int(row["season_id"]))
+
+        for row in race_rows:
+            identity = (
+                (row["season_year"], row["season_quarter"])
+                if row["season_year"] is not None and row["season_quarter"] is not None
+                else season_identity(row["season_name"])
+            )
+            if identity is None:
+                continue
+            group = ensure(*identity)
+            group["downloaded"] = True
+            group["races"] += 1
+
+        for group in groups.values():
+            group["season_ids"] = sorted(set(group.get("season_ids", [])))
+        return sorted(
+            groups.values(),
+            key=lambda item: tuple(int(part) for part in item["key"].split("-")),
+            reverse=True,
+        )
+
     def set_setting(self, key: str, value: str | None) -> None:
         with self.connect() as connection:
             connection.execute(
@@ -356,6 +543,8 @@ class RaceRepository:
         *,
         category: str | None = None,
         season_id: int | None = None,
+        season_year: int | None = None,
+        season_quarter: int | None = None,
         season_name: str | None = None,
         series_name: str | None = None,
         car_name: str | None = None,
@@ -364,6 +553,8 @@ class RaceRepository:
         filters = {
             "category": category,
             "season_id": season_id,
+            "season_year": season_year,
+            "season_quarter": season_quarter,
             "season_name": season_name,
             "series_name": series_name,
             "car_name": car_name,
@@ -405,6 +596,12 @@ class RaceRepository:
             ).fetchone()
         return {
             "last_irstats_sync": self.get_meta("last_irstats_sync"),
+            "last_irstats_requests": self.get_meta("last_irstats_requests"),
+            "last_iracingdata_requests": self.get_meta("last_iracingdata_requests"),
+            "last_sync_imported": self.get_meta("last_sync_imported"),
+            "last_sync_cached_pages": self.get_meta("last_sync_cached_pages"),
+            "current_season_name": self.get_meta("current_season_name"),
+            "current_season_ids": self.get_meta("current_season_ids"),
             "last_successful_irstats_page": self.get_meta("last_successful_irstats_page"),
             "total_irstats_pages": self.get_meta("total_pages"),
             "index_sync_incomplete": self.get_meta("index_sync_incomplete", False),

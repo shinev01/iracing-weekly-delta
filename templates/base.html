@@ -17,9 +17,7 @@
           <a href="/settings">Settings</a>
         </nav>
       </header>
-      {% if sync_error %}
-        <div class="alert danger sync-alert">{{ sync_error }}</div>
-      {% endif %}
+      <div class="alert danger sync-alert" data-sync-error role="alert" {% if not sync_error %}hidden{% endif %}>{{ sync_error or '' }}</div>
       {% block content %}{% endblock %}
     </div>
     <script src="{{ url_for('static', path='app.js') }}"></script>

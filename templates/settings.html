@@ -9,9 +9,20 @@
       <button class="button primary" type="submit">Save</button>
     </form>
   </section>
+  {% if cust_id %}
+  <section class="form-card advanced-card">
+    <p class="eyebrow">ADVANCED</p>
+    <h2>Import entire career</h2>
+    <p class="muted">iRStats rate limits requests. This operation may require multiple resume cycles.</p>
+    <form action="/sync" method="post" data-sync-form>
+      <input type="hidden" name="mode" value="career">
+      <button class="button ghost" type="submit" data-sync-button>Import entire career</button>
+    </form>
+    {% if index_sync_incomplete %}<p class="muted">A previous career import can continue from its saved page checkpoint.</p>{% endif %}
+  </section>
+  {% endif %}
   {% if debug %}
   <section class="form-card"><h2>Current sync state</h2><dl class="debug-list">{% for key, value in debug.items() %}<div><dt>{{ key }}</dt><dd>{{ value or '—' }}</dd></div>{% endfor %}</dl></section>
   {% endif %}
 </main>
 {% endblock %}
-

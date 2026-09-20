@@ -418,7 +418,7 @@ class IrstatsClient:
         browser_channel: str | None = "chrome",
         browser_wait_seconds: float = 180.0,
         page_delay: float | None = None,
-        sleeper: Any = time.sleep,
+        sleeper: Callable[[float], None] = time.sleep,
         progress: Callable[[str], None] | None = None,
     ) -> None:
         self.http = http or ResilientHTTPClient()
@@ -431,6 +431,7 @@ class IrstatsClient:
         self.page_delay = page_delay if page_delay is not None else _default_page_delay()
         self.sleeper = sleeper
         self.progress = progress
+        self._known_total_pages: int | None = None
 
     def _get_html(self, url: str) -> str:
         if self.browser_only:
@@ -495,8 +496,21 @@ class IrstatsClient:
         max_pages: int | None = None,
     ) -> Iterator[IrstatsPage]:
         page_number = start_page
+        discovered = 0
         while True:
-            page = self.fetch_page(cust_id, page_number)
+            try:
+                page = self.fetch_page(cust_id, page_number)
+            except RateLimitError as error:
+                # A 429 is a stop signal. The caller must preserve its
+                # checkpoint and wait for a later user-triggered run.
+                error.page = page_number
+                error.rate_limit_retries = 0
+                raise
+
+            if page.total_pages is not None:
+                self._known_total_pages = page.total_pages
+            discovered += len(page.races)
+            self._report_page_complete(page.page, discovered)
             yield page
             if not page.has_more or (max_pages is not None and page_number >= max_pages):
                 return
@@ -505,6 +519,14 @@ class IrstatsClient:
                 if self.progress is not None:
                     self.progress(f"Next request in {self.page_delay:g} seconds")
                 self.sleeper(self.page_delay)
+
+    def _report_page_complete(self, page_number: int, discovered: int) -> None:
+        if self.progress is None:
+            return
+        total = self._known_total_pages
+        total_label = str(total) if total is not None else "?"
+        self.progress(f"Page {page_number} / {total_label} complete")
+        self.progress(f"{discovered} races discovered")
 
 
 def _default_page_delay() -> float:

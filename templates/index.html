@@ -14,16 +14,14 @@
         <button class="button primary" type="submit" data-sync-button {% if not cust_id %}disabled{% endif %}>Sync</button>
       </form>
       <form action="/sync" method="post" data-sync-form>
-        <input type="hidden" name="mode" value="full">
-        <button class="button ghost" type="submit" data-sync-button {% if not cust_id %}disabled{% endif %}>Full rescan</button>
+        <input type="hidden" name="mode" value="rescan-season">
+        <input type="hidden" name="season_key" value="{{ season_key or (season_options[0].key if season_options else '') }}">
+        <button class="button ghost" type="submit" data-sync-button {% if not cust_id or not season_options or season_not_downloaded %}disabled{% endif %}>Rescan season</button>
       </form>
-      {% if index_sync_incomplete %}
-        <form action="/sync" method="post" data-sync-form>
-          <input type="hidden" name="mode" value="resume">
-          <button class="button ghost" type="submit" data-sync-button {% if not cust_id %}disabled{% endif %}>Resume import</button>
-        </form>
-      {% endif %}
-      <span class="sync-status" data-sync-status aria-live="polite">{{ sync_progress }}</span>
+      <div class="sync-progress" data-sync-progress data-sync-running="{{ 'true' if sync_running else 'false' }}" {% if not sync_running and not sync_progress %}hidden{% endif %}>
+        <span class="sync-progress-title">Sync status</span>
+        <span class="sync-status" data-sync-status aria-live="polite">{{ sync_progress }}</span>
+      </div>
     </div>
   </section>
 
@@ -44,10 +42,10 @@
           </select>
         </label>
         <label>Season
-          <select name="season_name" onchange="this.form.submit()">
+          <select name="season_key" onchange="this.form.submit()">
             <option value="">All seasons</option>
             {% for option in season_options %}
-              <option value="{{ option }}" {% if option == season_name %}selected{% endif %}>{{ option }}</option>
+              <option value="{{ option.key }}" {% if option.key == season_key %}selected{% endif %}>{{ option.label }}{% if not option.downloaded %} · Not downloaded{% endif %}</option>
             {% endfor %}
           </select>
         </label>
@@ -77,6 +75,19 @@
         </label>
       </form>
     </section>
+
+    {% if season_not_downloaded and selected_season %}
+      <section class="empty-state season-import-card">
+        <p class="eyebrow">SEASON HISTORY</p>
+        <h2>{{ selected_season.label }}</h2>
+        <p class="muted">This season has not been downloaded yet.</p>
+        <form action="/sync" method="post" data-sync-form>
+          <input type="hidden" name="mode" value="season">
+          <input type="hidden" name="season_key" value="{{ selected_season.key }}">
+          <button class="button primary" type="submit" data-sync-button>Import season</button>
+        </form>
+      </section>
+    {% endif %}
 
     <section class="metric-grid">
       <article class="metric-card accent"><span>Current iRating</span><strong>{{ summary.current_irating or '—' }}</strong></article>

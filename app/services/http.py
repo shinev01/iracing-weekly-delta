@@ -24,10 +24,13 @@ class RateLimitError(RemoteSourceError):
 
     def __init__(self, url: str, retry_after: float | None = None) -> None:
         self.url = url
-        self.retry_after = retry_after if retry_after is not None else 60.0
-        super().__init__(
-            f"{url} returned HTTP 429. Retry after about {self.retry_after:g} seconds."
+        self.retry_after = retry_after
+        detail = (
+            f" Retry after about {retry_after:g} seconds."
+            if retry_after is not None
+            else ""
         )
+        super().__init__(f"{url} returned HTTP 429.{detail}")
 
 
 class RemoteResponseError(RemoteSourceError):
@@ -138,8 +141,9 @@ class ResilientHTTPClient:
                     response.headers.get("retry-after")
                     or response.headers.get("Retry-After")
                 )
-                # A 429 is a signal to stop this sync, not a transient error to
-                # hammer three more times with exponential backoff.
+                # 429 is handled by the page-level iRStats iterator. Keeping it
+                # out of this client's generic retry loop prevents extra
+                # requests during the required cooldown.
                 raise RateLimitError(url, retry_after)
 
             if response.status in self.RETRYABLE_STATUS:

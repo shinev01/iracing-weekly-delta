@@ -20,7 +20,16 @@ def build_parser() -> argparse.ArgumentParser:
     sync.add_argument(
         "--full-rescan",
         action="store_true",
-        help="Read all available irstats pages instead of stopping at known history",
+        help="Advanced: import the entire career (rate limits may require resume cycles)",
+    )
+    sync.add_argument(
+        "--season-key",
+        help="Import one season, for example 2026-3",
+    )
+    sync.add_argument(
+        "--rescan-season",
+        action="store_true",
+        help="Recheck the selected season's index without redownloading complete details",
     )
 
     serve = subparsers.add_parser("serve", help="Run the local FastAPI UI")
@@ -38,7 +47,19 @@ def main(argv: list[str] | None = None) -> int:
         if not cust_id:
             print("Provide --cust-id or save Customer ID at /settings.")
             return 2
-        report = SyncService(repository).sync(cust_id, full_rescan=args.full_rescan)
+        if args.full_rescan and args.season_key:
+            parser.error("--full-rescan and --season-key are mutually exclusive")
+        report = SyncService(repository).sync(
+            cust_id,
+            full_rescan=args.full_rescan,
+            season_key=args.season_key,
+            rescan_season=args.rescan_season,
+        )
+        print(
+            f"iRStats requests: {report.irstats_requests}; "
+            f"iRacingData detail requests: {report.details_requested}; "
+            f"stored races: {report.races_stored}"
+        )
         return 1 if report.stopped_reason else 0
 
     if args.command == "serve":
@@ -56,4 +77,3 @@ def _configured_cust_id(repository: RaceRepository) -> int | None:
     except ValueError:
         return None
     return parsed if parsed and parsed > 0 else None
-

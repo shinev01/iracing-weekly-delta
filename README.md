@@ -25,16 +25,22 @@ python -m pip install -r requirements.txt
 
 ## CLI
 
-Первичный полный импорт:
-
-```powershell
-python main.py sync --cust-id 123456 --full-rescan
-```
-
-Короткая синхронизация после первичного импорта:
+Обычная синхронизация:
 
 ```powershell
 python main.py sync --cust-id 123456
+```
+
+Импорт одного исторического сезона:
+
+```powershell
+python main.py sync --cust-id 123456 --season-key 2026-3
+```
+
+Расширенный импорт всей карьеры доступен только явно:
+
+```powershell
+python main.py sync --cust-id 123456 --full-rescan
 ```
 
 Совместимый shortcut:
@@ -49,15 +55,17 @@ python sync.py --cust-id 123456
 python main.py sync --cust-id 123456 --db-path data\iracing.db
 ```
 
-Обычный `Sync` читает только первую страницу irstats (50 последних гонок). `Full rescan` читает историю строго последовательно, с задержкой 6 секунд между страницами. Задержку можно изменить через `IRSTATS_PAGE_DELAY`, но concurrency для страниц irstats не используется. Затем отсутствующие детали запрашиваются максимум двумя параллельными workers только с iRacingData backend. Каждый индекс и результат сохраняется сразу, поэтому остановка процесса не уничтожает уже импортированный прогресс.
+Обычный `Sync` делает один свежий запрос первой страницы iRStats и запрашивает детали только для новых гонок. При первом запуске metadata iRacingData определяет текущий сезон; страницы читаются потоком и остановка происходит на границе предыдущего сезона. Исторические сезоны импортируются по одному через `--season-key`. Уже закэшированные index pages используются без нового запроса.
+
+`--full-rescan` — отдельный advanced workflow: он читает историю строго последовательно, с задержкой 6 секунд между страницами, и может потребовать несколько запусков после rate limit. Даже в этом режиме полный detail уже сохранённой гонки повторно не скачивается. Задержку можно изменить через `IRSTATS_PAGE_DELAY`, но обход rate limit и немедленные retry не используются.
 
 Если обычный HTML-запрос irstats получает HTTP 403, приложение открывает только публичную страницу irstats в обычном видимом persistent Playwright browser context и ждёт, пока пользователь при необходимости завершит стандартную проверку Cloudflare. Никакие stealth/fingerprint/proxy/CAPTCHA bypass механизмы не используются. Профиль сохраняется локально в `%USERPROFILE%\.iracing-weekly-tracker\irstats-browser-profile`.
 
 Fallback по умолчанию запускает установленный системный Chrome. Если Chrome отсутствует, можно установить bundled Chromium командой `playwright install chromium` и передать `browser_channel=None` при создании клиента.
 
-После первого direct HTTP 403 или Cloudflare client переключается в browser-only mode до конца текущего процесса Sync; persistent Playwright context переиспользуется для всех следующих страниц. `--full-rescan` возобновляется со страницы после `last_successful_irstats_page`, если предыдущий запуск был прерван rate limit. После завершения обхода этот checkpoint помечается завершённым.
+После первого direct HTTP 403 или Cloudflare client переключается в browser-only mode до конца текущего процесса Sync; persistent Playwright context переиспользуется для всех следующих страниц. Advanced career import возобновляется со страницы после `last_successful_irstats_page`, если предыдущий запуск был прерван rate limit. После завершения обхода этот checkpoint помечается завершённым.
 
-При HTTP 429 быстрые retry не выполняются. Успешные страницы и найденные `subsession_id` сохраняются в локальный `irstats_index`; UI показывает сохранённый прогресс и предлагает `Resume import` примерно через 60 секунд.
+При HTTP 429 UI показывает сохранённый прогресс и cooldown; немедленный retry не выполняется. Успешные страницы и найденные `subsession_id` сохраняются в локальный `irstats_index`, а persistent browser context сохраняется и переиспользуется в browser-only режиме.
 
 ## Web UI
 
@@ -74,6 +82,9 @@ python main.py serve
 UI включает:
 
 - выбор категории, сезона, серии, машины и трассы;
+- `Sync` только для последних гонок и `Rescan season` для выбранного сезона;
+- явный `Import season` для сезона, которого ещё нет локально;
+- `Import entire career` только в Settings / Advanced с предупреждением о rate limits;
 - карточки current iRating, season change, races, wins, podiums и average SOF;
 - weekly chart и переключатель Every race;
 - раскрываемые race week с деталями каждой гонки;

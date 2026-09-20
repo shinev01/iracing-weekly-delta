@@ -33,7 +33,7 @@ def test_get_json_keeps_json_accept_header() -> None:
     assert calls[0]["Accept"] == "application/json"
 
 
-def test_429_stops_without_fast_retries_and_uses_sixty_second_default() -> None:
+def test_429_is_returned_without_fast_retries_or_sleeps() -> None:
     calls = 0
     sleeps: list[float] = []
 
@@ -49,7 +49,7 @@ def test_429_stops_without_fast_retries_and_uses_sixty_second_default() -> None:
 
     assert calls == 1
     assert sleeps == []
-    assert error.value.retry_after == 60.0
+    assert error.value.retry_after is None
 
 
 def test_429_preserves_retry_after_header() -> None:

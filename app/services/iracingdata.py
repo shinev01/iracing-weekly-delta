@@ -45,6 +45,24 @@ class ScheduleEntry:
     raw: dict[str, Any]
 
 
+@dataclass(frozen=True, slots=True)
+class SeasonInfo:
+    """A season shared by many series-specific iRacing season IDs."""
+
+    year: int
+    quarter: int
+    season_ids: tuple[int, ...] = ()
+    season_names: tuple[str, ...] = ()
+
+    @property
+    def key(self) -> str:
+        return f"{self.year}-{self.quarter}"
+
+    @property
+    def label(self) -> str:
+        return f"{self.year} Season {self.quarter}"
+
+
 class IRacingDataClient:
     """Consumer-facing public iRacingData backend client."""
 
@@ -109,7 +127,12 @@ class SeasonMetadataClient:
             "https://iracing6-backend.herokuapp.com/api/series-basic-info/all-seasons"
         )
         seasons = payload.get("seasons", []) if isinstance(payload, dict) else payload
+        self.season_records = []
+        self.category_by_id.clear()
+        self.category_by_name.clear()
         for season in seasons or []:
+            if not isinstance(season, dict):
+                continue
             self.season_records.append(season)
             category = normalize_category(season.get("category"))
             season_id = _as_int(season.get("season_id"))
@@ -117,7 +140,53 @@ class SeasonMetadataClient:
                 self.category_by_id[season_id] = category
             season_name = _clean(season.get("season_name"))
             if season_name and category:
-                self.category_by_name[season_name.strip()] = category
+                    self.category_by_name[season_name.strip()] = category
+
+    def current_season(self) -> SeasonInfo | None:
+        """Return the newest numbered season represented by metadata."""
+        candidates = [
+            identity
+            for season in self.season_records
+            if (identity := season_identity(season.get("season_name"))) is not None
+        ]
+        if not candidates:
+            return None
+        year, quarter = max(candidates)
+        return self.season_for_key(f"{year}-{quarter}")
+
+    def season_for_key(self, key: str) -> SeasonInfo | None:
+        """Group all series records that belong to one displayed season."""
+        try:
+            year_text, quarter_text = key.split("-", 1)
+            year = int(year_text)
+            quarter = int(quarter_text)
+        except (AttributeError, ValueError):
+            return None
+        if not 2000 <= year <= 2100 or not 1 <= quarter <= 4:
+            return None
+        matching = [
+            season
+            for season in self.season_records
+            if season_identity(season.get("season_name")) == (year, quarter)
+        ]
+        return SeasonInfo(
+            year=year,
+            quarter=quarter,
+            season_ids=tuple(
+                sorted(
+                    season_id
+                    for season in matching
+                    if (season_id := _as_int(season.get("season_id"))) is not None
+                )
+            ),
+            season_names=tuple(
+                sorted(
+                    name
+                    for season in matching
+                    if (name := _clean(season.get("season_name"))) is not None
+                )
+            ),
+        )
 
     def get_schedule(self, season_name: str, season_id: int | None = None) -> list[ScheduleEntry]:
         if season_id is not None and season_id in self.schedules_by_season:
@@ -168,3 +237,23 @@ def _as_int(value: Any) -> int | None:
         return int(value) if value is not None else None
     except (TypeError, ValueError):
         return None
+
+
+def season_identity(season_name: str | None) -> tuple[int, int] | None:
+    """Extract the numbered iRacing season identity from a series name."""
+    if not season_name:
+        return None
+    words = str(season_name).replace("-", " ").split()
+    for index, word in enumerate(words):
+        if (
+            word.isdigit()
+            and len(word) == 4
+            and 2000 <= int(word) <= 2100
+            and index + 2 < len(words)
+            and words[index + 1].casefold() == "season"
+            and words[index + 2].isdigit()
+        ):
+            quarter = int(words[index + 2])
+            if 1 <= quarter <= 4:
+                return int(word), quarter
+    return None
